@@ -1,0 +1,16 @@
+[package]
+name = "psd-rs"
+version = "0.2.0"
+edition = "2024"
+authors = ["zalo <gonzalo.sosa@proton.me>"]
+license = "MIT"
+
+[dependencies]
+ctrlc = "3.4"
+
+[profile.release]
+opt-level = "z"       # Optimize for binary size (which translates to smaller memory footprint)
+lto = true            # Enable Link-Time Optimization (LTO)
+codegen-units = 1     # Maximize optimizations across the whole binary
+panic = "abort"       # Abort on panic to remove stack unwinding code (shrinks binary & RSS)
+strip = true          # Strip symbols and debug info from the binary
