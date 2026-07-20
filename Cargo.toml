@@ -2,7 +2,7 @@
 name = "psd-rs"
 version = "0.2.0"
 edition = "2024"
-authors = ["zalo <gonzalo.sosa@proton.me>"]
+authors = ["Gonzalo Sosa <gonzalo.sosa@proton.me>"]
 license = "MIT"
 
 [dependencies]
