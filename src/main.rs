@@ -23,6 +23,19 @@ struct BrowserConfig {
     exclude_patterns: &'static [&'static str],
 }
 
+/// Helper to construct the volatile RAM profile path in a multi-user safe manner.
+fn get_volatile_path(browser_name: &str, profile_dir_name: &str) -> PathBuf {
+    let username = env::var("USER")
+        .or_else(|_| env::var("LOGNAME"))
+        .unwrap_or_else(|_| "shared".to_string());
+    PathBuf::from(format!(
+        "/dev/shm/{}-{}-{}",
+        username,
+        browser_name.to_lowercase(),
+        profile_dir_name
+    ))
+}
+
 /// Cleans up any leftover lock symlinks or socket files in a profile directory.
 fn cleanup_stale_locks(profile_path: &Path) {
     let stale_files = [
@@ -192,7 +205,7 @@ fn process_browser(config: &BrowserConfig) {
     let backup_name = format!("{}-backup", config.profile_dir_name);
     static_backup_path.set_file_name(backup_name);
 
-    let volatile_path = PathBuf::from(format!("/dev/shm/{}-{}", config.name.to_lowercase(), config.profile_dir_name));
+    let volatile_path = get_volatile_path(config.name, &config.profile_dir_name);
 
     // --- CRASH RECOVERY (Self-Healing) ---
     // If the system crashed, the symlink is dangling. This self-heals by restoring from the backup.
@@ -302,7 +315,7 @@ fn sync_volatile_to_backup(config: &BrowserConfig) {
     let backup_name = format!("{}-backup", config.profile_dir_name);
     static_backup_path.set_file_name(backup_name);
 
-    let volatile_path = PathBuf::from(format!("/dev/shm/{}-{}", config.name.to_lowercase(), config.profile_dir_name));
+    let volatile_path = get_volatile_path(config.name, &config.profile_dir_name);
 
     if volatile_path.exists() && static_backup_path.exists() {
         println!("Syncing {} from RAM back to SSD backup...", config.name);
@@ -341,7 +354,7 @@ fn restore_profile_to_disk(config: &BrowserConfig) {
     let backup_name = format!("{}-backup", config.profile_dir_name);
     static_backup_path.set_file_name(backup_name);
 
-    let volatile_path = PathBuf::from(format!("/dev/shm/{}-{}", config.name.to_lowercase(), config.profile_dir_name));
+    let volatile_path = get_volatile_path(config.name, &config.profile_dir_name);
 
     // Wait briefly if browser is still shutting down during OS reboot
     let mut wait_attempts = 0;
