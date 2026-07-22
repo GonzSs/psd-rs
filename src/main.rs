@@ -351,6 +351,14 @@ fn restore_profile_to_disk(config: &BrowserConfig) {
         wait_attempts += 1;
     }
 
+    if is_browser_running(&full_profile_path, config.lock_file_name, config.lock_format) {
+        eprintln!(
+            "Error: {} is still running after grace period! Refusing to restore to disk to prevent data corruption.",
+            config.name
+        );
+        return;
+    }
+
     // 1. Final sync from RAM to backup folder
     if volatile_path.exists() && static_backup_path.exists() {
         println!("Performing final sync for {}...", config.name);

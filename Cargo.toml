@@ -6,7 +6,7 @@ authors = ["Gonzalo Sosa <gonzalo.sosa@proton.me>"]
 license = "MIT"
 
 [dependencies]
-ctrlc = "3.4"
+ctrlc = { version = "3.4", features = ["termination"] }
 
 [profile.release]
 opt-level = "z"       # Optimize for binary size (which translates to smaller memory footprint)
