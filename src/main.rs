@@ -200,6 +200,38 @@ fn process_browser(config: &BrowserConfig) {
         // If we restored it, let's proceed to set it up in RAM again.
     }
 
+    // --- SPLIT-BRAIN RECOVERY ---
+    // If both the profile directory and the backup directory exist, and the profile is NOT a symlink,
+    // the browser was likely launched while the daemon was stopped, creating a new empty profile directory.
+    let is_symlink = fs::symlink_metadata(&full_profile_path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false);
+    if full_profile_path.exists() && !is_symlink && static_backup_path.exists() {
+        println!(
+            "Detected split-brain state for {}: both profile and backup exist. Resolving...",
+            config.name
+        );
+        let mut stale_path = full_profile_path.clone();
+        let stale_name = format!("{}-stale", config.profile_dir_name);
+        stale_path.set_file_name(stale_name);
+
+        if stale_path.exists() {
+            let _ = fs::remove_dir_all(&stale_path);
+        }
+        if let Err(e) = fs::rename(&full_profile_path, &stale_path) {
+            eprintln!("Failed to rename conflicting profile directory: {:?}", e);
+            return;
+        }
+        println!("Moved conflicting profile directory to {:?}", stale_path);
+
+        if let Err(e) = fs::rename(&static_backup_path, &full_profile_path) {
+            eprintln!("Failed to restore backup directory: {:?}", e);
+            let _ = fs::rename(&stale_path, &full_profile_path);
+            return;
+        }
+        println!("Successfully restored backup directory to active profile slot.");
+    }
+
     // --- PHASE 1: LOCATE AND VERIFY ---
     if is_browser_running(&full_profile_path, config.lock_file_name, config.lock_format) {
         println!("{} is currently running. Skipping to prevent data corruption.", config.name);
