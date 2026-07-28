@@ -24,11 +24,46 @@ cp target/release/psd-rs ~/.local/bin/
 
 ## Usage
 
-Run directly or supervise via `runit` or `systemd`:
+### Running Directly
+
+You can start the daemon manually in the foreground:
 
 ```bash
 psd-rs
 ```
+
+### Running as a Runit User Service
+
+To set up `psd-rs` to run automatically and log gracefully under `runit` in user-space:
+
+1. **Create the target directory structure** in your home directory:
+   ```bash
+   mkdir -p ~/.config/runit/sv/psd-rs/log
+   mkdir -p ~/.config/runit/service
+   ```
+
+2. **Copy the service templates** from the repository to your config folder:
+   ```bash
+   cp runit/run ~/.config/runit/sv/psd-rs/run
+   cp runit/log/run ~/.config/runit/sv/psd-rs/log/run
+   ```
+
+3. **Make the run scripts executable**:
+   ```bash
+   chmod +x ~/.config/runit/sv/psd-rs/run
+   chmod +x ~/.config/runit/sv/psd-rs/log/run
+   ```
+
+4. **Enable the service** by creating a symbolic link in the active services folder:
+   ```bash
+   ln -s ~/.config/runit/sv/psd-rs ~/.config/runit/service/psd-rs
+   ```
+
+5. **Configure autostart**:
+   Add this line to your display manager autostart file (like `~/.xprofile`) or your shell profile so that the supervisor starts upon login:
+   ```bash
+   runsvdir -P ~/.config/runit/service &
+   ```
 
 ## License
 

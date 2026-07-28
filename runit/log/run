@@ -1,0 +1,6 @@
+#!/bin/sh
+# Ensure the logging destination directory exists
+mkdir -p "$HOME/.config/runit/sv/psd-rs/log/output"
+
+# Run svlogd with TAI64N timestamping
+exec svlogd -tt "$HOME/.config/runit/sv/psd-rs/log/output"

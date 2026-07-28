@@ -1,0 +1,6 @@
+#!/bin/sh
+# Redirect stderr to stdout so all logs go to svlogd
+exec 2>&1
+
+# Start the daemon
+exec "$HOME/.local/bin/psd-rs"
