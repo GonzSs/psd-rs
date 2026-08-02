@@ -251,6 +251,16 @@ fn process_browser(config: &BrowserConfig) {
         return;
     }
 
+    // Cooldown settling period: If stale lock files are present, the browser might have
+    // just exited. We sleep briefly to allow the OS page cache and SQLite WAL files to flush.
+    let lock_path = full_profile_path.join(config.lock_file_name);
+    let parentlock_path = full_profile_path.join(".parentlock");
+    let has_stale_lock = fs::symlink_metadata(&lock_path).is_ok() || parentlock_path.exists();
+    if has_stale_lock {
+        println!("Detected stale lock files for {}. Waiting 1.5s for filesystem to settle...", config.name);
+        thread::sleep(Duration::from_millis(1500));
+    }
+
     // Safety check: is it already a valid symlink to RAM?
     if let Ok(metadata) = fs::symlink_metadata(&full_profile_path) {
         if metadata.file_type().is_symlink() {

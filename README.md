@@ -33,6 +33,28 @@ for browser process termination before restoring profiles back to physical disk.
 
 ## Build & Installation
 
+### Option A: Setup Script (Systemd-only for now)
+
+You can run the setup script, right now only for systemd,
+to automatically download the latest precompiled binary and configure/enable
+the systemd user service:
+
+```bash
+curl -fsSL 
+https://raw.githubusercontent.com/GonzSs/psd-rs/master/psd-rs-setup.bash | bash
+```
+
+Alternatively, if you have cloned the repository, you can run the setup script locally:
+
+```bash
+chmod +x psd-rs-setup.bash
+./psd-rs-setup.bash
+```
+
+### Option B: Build from Source
+
+To compile from source:
+
 ```bash
 git clone https://github.com/GonzSs/psd-rs.git
 cd psd-rs
