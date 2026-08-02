@@ -1,6 +1,6 @@
 [package]
 name = "psd-rs"
-version = "0.2.0"
+version = "0.1.0"
 edition = "2024"
 authors = ["Gonzalo Sosa <gonzalo.sosa@proton.me>"]
 license = "MIT"
