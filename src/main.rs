@@ -6,12 +6,6 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
-#[derive(Clone, Copy)]
-enum LockFormat {
-    Firefox,  // Extracts PID after '+' (e.g., 127.0.0.1:+18085)
-    Chromium, // Extracts PID after '-' (e.g., hostname-18085)
-}
-
 struct BrowserConfig {
     name: &'static str,
     // The directory where profiles sit (e.g. ~/.config/BraveSoftware/Brave-Origin-Beta)
@@ -19,7 +13,6 @@ struct BrowserConfig {
     // The specific profile folder (e.g. Default)
     profile_dir_name: String,
     lock_file_name: &'static str,
-    lock_format: LockFormat,
     exclude_patterns: &'static [&'static str],
 }
 
@@ -104,33 +97,35 @@ fn find_firefox_default_profile(ini_content: &str) -> Option<&str> {
 
 /// Inspects the browser's lock file/symlink and verifies process liveness.
 /// If the lock is stale (process is dead), it self-heals by deleting the lock files.
-fn is_browser_running(profile_path: &Path, lock_file: &str, format: LockFormat) -> bool {
+fn is_browser_running(profile_path: &Path, lock_file: &str) -> bool {
     let lock_path = profile_path.join(lock_file);
     
     if let Ok(target) = fs::read_link(&lock_path) {
         if let Some(target_str) = target.to_str() {
-            // Find the delimiter character based on the browser type
-            let delimiter = match format {
-                LockFormat::Firefox => '+',
-                LockFormat::Chromium => '-',
-            };
+            // Robustly extract the PID from the end of the symlink target.
+            // Works for Firefox (127.0.0.1:+PID), Chromium (host-PID), and raw PIDs.
+            let mut pid_str = String::new();
+            for c in target_str.chars().rev() {
+                if c.is_digit(10) {
+                    pid_str.insert(0, c);
+                } else if !pid_str.is_empty() {
+                    break;
+                }
+            }
             
-            if let Some(delim_idx) = target_str.rfind(delimiter) {
-                let pid_str = &target_str[delim_idx + 1..];
-                if let Ok(pid) = pid_str.parse::<i32>() {
-                    let proc_path = format!("/proc/{}", pid);
-                    let comm_path = format!("/proc/{}/comm", pid);
-                    
-                    if fs::metadata(&proc_path).is_ok() {
-                        if let Ok(comm) = fs::read_to_string(&comm_path) {
-                            let comm_lower = comm.to_lowercase();
-                            // Match firefox, chrome, or brave binaries
-                            if comm_lower.contains("firefox") 
-                                || comm_lower.contains("geckomain")
-                                || comm_lower.contains("chrome")
-                                || comm_lower.contains("brave") {
-                                return true;
-                            }
+            if let Ok(pid) = pid_str.parse::<i32>() {
+                let proc_path = format!("/proc/{}", pid);
+                let comm_path = format!("/proc/{}/comm", pid);
+                
+                if fs::metadata(&proc_path).is_ok() {
+                    if let Ok(comm) = fs::read_to_string(&comm_path) {
+                        let comm_lower = comm.to_lowercase();
+                        // Match firefox, chrome, or brave binaries
+                        if comm_lower.contains("firefox") 
+                            || comm_lower.contains("geckomain")
+                            || comm_lower.contains("chrome")
+                            || comm_lower.contains("brave") {
+                            return true;
                         }
                     }
                 }
@@ -246,7 +241,7 @@ fn process_browser(config: &BrowserConfig) {
     }
 
     // --- PHASE 1: LOCATE AND VERIFY ---
-    if is_browser_running(&full_profile_path, config.lock_file_name, config.lock_format) {
+    if is_browser_running(&full_profile_path, config.lock_file_name) {
         println!("{} is currently running. Skipping to prevent data corruption.", config.name);
         return;
     }
@@ -366,15 +361,16 @@ fn restore_profile_to_disk(config: &BrowserConfig) {
 
     let volatile_path = get_volatile_path(config.name, &config.profile_dir_name);
 
-    // Wait briefly if browser is still shutting down during OS reboot
+    // Wait briefly if browser is still shutting down during OS reboot.
+    // Check every 100ms for up to 30 attempts (3 seconds total) to be highly responsive.
     let mut wait_attempts = 0;
-    while is_browser_running(&full_profile_path, config.lock_file_name, config.lock_format) && wait_attempts < 6 {
+    while is_browser_running(&full_profile_path, config.lock_file_name) && wait_attempts < 30 {
         println!("Browser {} is still shutting down. Waiting for process exit...", config.name);
-        thread::sleep(Duration::from_millis(500));
+        thread::sleep(Duration::from_millis(100));
         wait_attempts += 1;
     }
 
-    if is_browser_running(&full_profile_path, config.lock_file_name, config.lock_format) {
+    if is_browser_running(&full_profile_path, config.lock_file_name) {
         eprintln!(
             "Error: {} is still running after grace period! Refusing to restore to disk to prevent data corruption.",
             config.name
@@ -443,7 +439,6 @@ fn main() {
                 base_dir: firefox_base,
                 profile_dir_name: profile_dir.to_string(),
                 lock_file_name: "lock",
-                lock_format: LockFormat::Firefox,
                 exclude_patterns: &["cache2", "startupCache", "jumpListCache", "lock", ".parentlock"],
             });
         }
@@ -458,7 +453,6 @@ fn main() {
             base_dir: brave_base,
             profile_dir_name: "Default".to_string(),
             lock_file_name: "SingletonLock",
-            lock_format: LockFormat::Chromium,
             exclude_patterns: &[
                 "Cache",
                 "Code Cache",
@@ -481,7 +475,6 @@ fn main() {
             base_dir: chrome_base,
             profile_dir_name: "Default".to_string(),
             lock_file_name: "SingletonLock",
-            lock_format: LockFormat::Chromium,
             exclude_patterns: &[
                 "Cache",
                 "Code Cache",
