@@ -10,22 +10,24 @@ struct BrowserConfig {
     name: &'static str,
     // The directory where profiles sit (e.g. ~/.config/BraveSoftware/Brave-Origin-Beta)
     base_dir: PathBuf,
-    // The specific profile folder (e.g. Default)
+    // The specific profile folder or subpath (e.g. Default or Profiles/arp45dlc.Nihil)
     profile_dir_name: String,
     lock_file_name: &'static str,
     exclude_patterns: &'static [&'static str],
+    is_chromium: bool,
 }
 
 /// Helper to construct the volatile RAM profile path in a multi-user safe manner.
-fn get_volatile_path(browser_name: &str, profile_dir_name: &str) -> PathBuf {
+fn get_volatile_path(browser_name: &str, profile_leaf_name: &str) -> PathBuf {
     let username = env::var("USER")
         .or_else(|_| env::var("LOGNAME"))
         .unwrap_or_else(|_| "shared".to_string());
+    let sanitized_leaf = profile_leaf_name.replace('/', "-");
     PathBuf::from(format!(
         "/dev/shm/{}-{}-{}",
         username,
         browser_name.to_lowercase(),
-        profile_dir_name
+        sanitized_leaf
     ))
 }
 
@@ -33,7 +35,6 @@ fn get_volatile_path(browser_name: &str, profile_dir_name: &str) -> PathBuf {
 fn cleanup_stale_locks(profile_path: &Path) {
     let stale_files = [
         "SingletonLock",
-        "SingletonCookie",
         "SingletonSocket",
         "lockfile",
         "lock",
@@ -49,7 +50,7 @@ fn cleanup_stale_locks(profile_path: &Path) {
 
 /// Sanitizes Chromium's Preferences file so that exit_type is marked as Normal
 /// and exited_cleanly is true. This prevents Chromium from showing "Closed unexpectedly"
-/// banners or invalidating session security cookies upon launch.
+/// banners upon launch. Only called during crash recovery, never during live sync.
 fn sanitize_chromium_preferences(profile_path: &Path) {
     let pref_path = profile_path.join("Preferences");
     if pref_path.exists() {
@@ -58,7 +59,7 @@ fn sanitize_chromium_preferences(profile_path: &Path) {
                 .replace("\"exit_type\":\"Crashed\"", "\"exit_type\":\"Normal\"")
                 .replace("\"exit_type\": \"Crashed\"", "\"exit_type\": \"Normal\"")
                 .replace("\"exit_type\":\"SessionEnded\"", "\"exit_type\":\"Normal\"")
-                .replace("\"exit_type\": \"SessionEnded\"", "\"exit_type\": \"Normal\"")
+                .replace("\"exit_type\": \"SessionEnded\"", "\"exit_type\":\"Normal\"")
                 .replace("\"exited_cleanly\":false", "\"exited_cleanly\":true")
                 .replace("\"exited_cleanly\": false", "\"exited_cleanly\": true");
 
@@ -78,7 +79,7 @@ fn find_firefox_default_profile(ini_content: &str) -> Option<&str> {
         if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
             continue;
         }
-        
+
         if line.starts_with('[') && line.ends_with(']') {
             let section = &line[1..line.len() - 1];
             in_install_section = section.len() >= 7 && section[..7].eq_ignore_ascii_case("install");
@@ -92,14 +93,46 @@ fn find_firefox_default_profile(ini_content: &str) -> Option<&str> {
             }
         }
     }
-    None
+
+    // Fallback: check [ProfileX] sections if [Install...] section was not found
+    let mut current_profile_path: Option<&str> = None;
+    let mut is_default_profile = false;
+
+    for line in ini_content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
+            continue;
+        }
+
+        if line.starts_with('[') && line.ends_with(']') {
+            if is_default_profile && current_profile_path.is_some() {
+                return current_profile_path;
+            }
+            current_profile_path = None;
+            is_default_profile = false;
+        } else if let Some(eq_idx) = line.find('=') {
+            let key = line[..eq_idx].trim();
+            let val = line[eq_idx + 1..].trim();
+            if key.eq_ignore_ascii_case("path") {
+                current_profile_path = Some(val);
+            } else if key.eq_ignore_ascii_case("default") && val == "1" {
+                is_default_profile = true;
+            }
+        }
+    }
+
+    if is_default_profile && current_profile_path.is_some() {
+        return current_profile_path;
+    }
+
+    current_profile_path
 }
 
 /// Inspects the browser's lock file/symlink and verifies process liveness.
 /// If the lock is stale (process is dead), it self-heals by deleting the lock files.
 fn is_browser_running(profile_path: &Path, lock_file: &str) -> bool {
     let lock_path = profile_path.join(lock_file);
-    
+
     if let Ok(target) = fs::read_link(&lock_path) {
         if let Some(target_str) = target.to_str() {
             // Robustly extract the PID from the end of the symlink target.
@@ -112,30 +145,31 @@ fn is_browser_running(profile_path: &Path, lock_file: &str) -> bool {
                     break;
                 }
             }
-            
+
             if let Ok(pid) = pid_str.parse::<i32>() {
                 let proc_path = format!("/proc/{}", pid);
                 let comm_path = format!("/proc/{}/comm", pid);
-                
+
                 if fs::metadata(&proc_path).is_ok() {
                     if let Ok(comm) = fs::read_to_string(&comm_path) {
                         let comm_lower = comm.to_lowercase();
                         // Match firefox, chrome, or brave binaries
-                        if comm_lower.contains("firefox") 
+                        if comm_lower.contains("firefox")
                             || comm_lower.contains("geckomain")
                             || comm_lower.contains("chrome")
-                            || comm_lower.contains("brave") {
+                            || comm_lower.contains("brave")
+                        {
                             return true;
                         }
                     }
                 }
             }
         }
-        
+
         // Lock exists but process is dead: Self-heal
         println!("Detected stale lock symlink {:?}. Cleaning up...", lock_path);
         let _ = fs::remove_file(&lock_path);
-        let _ = fs::remove_file(profile_path.join(".parentlock")); // Firefox-specific secondary lock
+        let _ = fs::remove_file(profile_path.join(".parentlock"));
     } else {
         // Fallback check for orphaned locking files without symlinks
         let parentlock = profile_path.join(".parentlock");
@@ -149,7 +183,11 @@ fn is_browser_running(profile_path: &Path, lock_file: &str) -> bool {
 
 /// Re-integrates the backup and RAM profile, checking for dangling symlinks (e.g. after a crash/reboot).
 /// Returns true if a backup exists and was successfully restored.
-fn check_and_recover_dangling_symlink(full_profile_path: &Path, static_backup_path: &Path) -> bool {
+fn check_and_recover_dangling_symlink(
+    full_profile_path: &Path,
+    static_backup_path: &Path,
+    is_chromium: bool,
+) -> bool {
     if let Ok(metadata) = fs::symlink_metadata(full_profile_path) {
         if metadata.file_type().is_symlink() {
             // Check if the destination target exists
@@ -159,18 +197,24 @@ fn check_and_recover_dangling_symlink(full_profile_path: &Path, static_backup_pa
                         "Detected dangling symlink at {:?} (target {:?} does not exist). Recovering from backup...",
                         full_profile_path, target
                     );
-                    
+
                     // 1. Remove the dangling symlink
                     let _ = fs::remove_file(full_profile_path);
-                    
+
                     // 2. Restore physical directory from backup if it exists
                     if static_backup_path.exists() {
                         cleanup_stale_locks(static_backup_path);
-                        sanitize_chromium_preferences(static_backup_path);
-                        fs::rename(static_backup_path, full_profile_path)
-                            .expect("Failed to restore profile from backup directory");
+                        if is_chromium {
+                            sanitize_chromium_preferences(static_backup_path);
+                        }
+                        if let Err(e) = fs::rename(static_backup_path, full_profile_path) {
+                            eprintln!("Error restoring backup directory: {:?}", e);
+                            return false;
+                        }
                         cleanup_stale_locks(full_profile_path);
-                        sanitize_chromium_preferences(full_profile_path);
+                        if is_chromium {
+                            sanitize_chromium_preferences(full_profile_path);
+                        }
                         println!("Successfully restored profile directory from backup.");
                         return true;
                     }
@@ -186,7 +230,7 @@ fn check_and_recover_dangling_symlink(full_profile_path: &Path, static_backup_pa
 
 fn process_browser(config: &BrowserConfig) {
     println!("=== Processing Browser: {} ===", config.name);
-    
+
     // Ensure base directory exists
     if !config.base_dir.exists() {
         println!("Base directory does not exist for {}. Skipping.", config.name);
@@ -196,21 +240,23 @@ fn process_browser(config: &BrowserConfig) {
     let mut full_profile_path = config.base_dir.clone();
     full_profile_path.push(&config.profile_dir_name);
 
+    // Extract leaf folder name safely to prevent path corruption with subdirectories like Profiles/xxxx
+    let leaf_name = full_profile_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&config.profile_dir_name)
+        .to_string();
+
     let mut static_backup_path = full_profile_path.clone();
-    let backup_name = format!("{}-backup", config.profile_dir_name);
+    let backup_name = format!("{}-backup", leaf_name);
     static_backup_path.set_file_name(backup_name);
 
-    let volatile_path = get_volatile_path(config.name, &config.profile_dir_name);
+    let volatile_path = get_volatile_path(config.name, &leaf_name);
 
     // --- CRASH RECOVERY (Self-Healing) ---
-    // If the system crashed, the symlink is dangling. This self-heals by restoring from the backup.
-    if check_and_recover_dangling_symlink(&full_profile_path, &static_backup_path) {
-        // If we restored it, let's proceed to set it up in RAM again.
-    }
+    check_and_recover_dangling_symlink(&full_profile_path, &static_backup_path, config.is_chromium);
 
     // --- SPLIT-BRAIN RECOVERY ---
-    // If both the profile directory and the backup directory exist, and the profile is NOT a symlink,
-    // the browser was likely launched while the daemon was stopped, creating a new empty profile directory.
     let is_symlink = fs::symlink_metadata(&full_profile_path)
         .map(|m| m.file_type().is_symlink())
         .unwrap_or(false);
@@ -220,7 +266,7 @@ fn process_browser(config: &BrowserConfig) {
             config.name
         );
         let mut stale_path = full_profile_path.clone();
-        let stale_name = format!("{}-stale", config.profile_dir_name);
+        let stale_name = format!("{}-stale", leaf_name);
         stale_path.set_file_name(stale_name);
 
         if stale_path.exists() {
@@ -266,20 +312,33 @@ fn process_browser(config: &BrowserConfig) {
 
     // --- PHASE 2: MOVE TO RAM ---
     if full_profile_path.exists() {
+        // If a leftover backup directory already exists, clean it first so rename succeeds
+        if static_backup_path.exists() {
+            let _ = fs::remove_dir_all(&static_backup_path);
+        }
+
         println!("Renaming physical profile to backup location: {:?}", static_backup_path);
-        fs::rename(&full_profile_path, &static_backup_path)
-            .expect("Failed to rename profile directory");
+        if let Err(e) = fs::rename(&full_profile_path, &static_backup_path) {
+            eprintln!("Failed to rename profile directory {:?}: {:?}", full_profile_path, e);
+            return;
+        }
     } else {
         println!("No profile found at {:?}. Skipping.", full_profile_path);
         return;
     }
 
-    // Sanitize locks/preferences in static backup before creating RAM copy
+    // Sanitize locks in static backup before creating RAM copy
     cleanup_stale_locks(&static_backup_path);
-    sanitize_chromium_preferences(&static_backup_path);
+    if config.is_chromium {
+        sanitize_chromium_preferences(&static_backup_path);
+    }
 
     println!("Creating RAM directory at {:?}", volatile_path);
-    fs::create_dir_all(&volatile_path).expect("Failed to create RAM directory");
+    if let Err(e) = fs::create_dir_all(&volatile_path) {
+        eprintln!("Failed to create RAM directory {:?}: {:?}", volatile_path, e);
+        let _ = fs::rename(&static_backup_path, &full_profile_path);
+        return;
+    }
 
     println!("Syncing files to RAM (excluding cache)...");
     let mut rsync_cmd = Command::new("rsync");
@@ -287,26 +346,39 @@ fn process_browser(config: &BrowserConfig) {
     for exclude in config.exclude_patterns {
         rsync_cmd.arg(format!("--exclude={}", exclude));
     }
-    let status = rsync_cmd
+    let rsync_res = rsync_cmd
         .arg(format!("{}/", static_backup_path.display()))
         .arg(format!("{}/", volatile_path.display()))
-        .status()
-        .expect("Failed to execute rsync command");
+        .status();
 
-    if !status.success() {
-        println!("rsync failed to copy files to RAM for {}.", config.name);
-        // Rollback backup renaming on failure
+    match rsync_res {
+        Ok(status) if status.success() => {},
+        _ => {
+            eprintln!("rsync failed to copy files to RAM for {}.", config.name);
+            let _ = fs::rename(&static_backup_path, &full_profile_path);
+            return;
+        }
+    }
+
+    // Ensure RAM profile has no stale locks
+    cleanup_stale_locks(&volatile_path);
+    if config.is_chromium {
+        sanitize_chromium_preferences(&volatile_path);
+    }
+
+    // --- PHASE 3: BRIDGE WITH A SYMLINK ---
+    // Ensure the target path is clear before creating the symlink
+    if full_profile_path.exists() || fs::symlink_metadata(&full_profile_path).is_ok() {
+        let _ = fs::remove_file(&full_profile_path);
+        let _ = fs::remove_dir_all(&full_profile_path);
+    }
+
+    println!("Creating symlink bridge...");
+    if let Err(e) = symlink(&volatile_path, &full_profile_path) {
+        eprintln!("Failed to create symlink bridge {:?} -> {:?}: {:?}", full_profile_path, volatile_path, e);
         let _ = fs::rename(&static_backup_path, &full_profile_path);
         return;
     }
-
-    // Ensure RAM profile has no stale locks or crashed preferences flag
-    cleanup_stale_locks(&volatile_path);
-    sanitize_chromium_preferences(&volatile_path);
-
-    // --- PHASE 3: BRIDGE WITH A SYMLINK ---
-    println!("Creating symlink bridge...");
-    symlink(&volatile_path, &full_profile_path).expect("Failed to create symlink");
 
     println!("Success! {} profile is running from RAM.", config.name);
 }
@@ -316,30 +388,34 @@ fn sync_volatile_to_backup(config: &BrowserConfig) {
     let mut full_profile_path = config.base_dir.clone();
     full_profile_path.push(&config.profile_dir_name);
 
+    let leaf_name = full_profile_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&config.profile_dir_name);
+
     let mut static_backup_path = full_profile_path.clone();
-    let backup_name = format!("{}-backup", config.profile_dir_name);
+    let backup_name = format!("{}-backup", leaf_name);
     static_backup_path.set_file_name(backup_name);
 
-    let volatile_path = get_volatile_path(config.name, &config.profile_dir_name);
+    let volatile_path = get_volatile_path(config.name, leaf_name);
 
     if volatile_path.exists() && static_backup_path.exists() {
         println!("Syncing {} from RAM back to SSD backup...", config.name);
-        
+
         let mut rsync_cmd = Command::new("rsync");
         rsync_cmd.arg("-a").arg("--delete").arg("--delete-excluded");
-        
+
         for exclude in config.exclude_patterns {
             rsync_cmd.arg(format!("--exclude={}", exclude));
         }
-        
+
         let status = rsync_cmd
             .arg(format!("{}/", volatile_path.display()))
             .arg(format!("{}/", static_backup_path.display()))
             .status();
-            
+
         match status {
             Ok(s) if s.success() => {
-                sanitize_chromium_preferences(&static_backup_path);
                 cleanup_stale_locks(&static_backup_path);
                 println!("Successfully synced {} back to SSD.", config.name);
             }
@@ -351,15 +427,20 @@ fn sync_volatile_to_backup(config: &BrowserConfig) {
 // --- PHASE 5: GRACEFUL SHUTDOWN FUNCTION ---
 fn restore_profile_to_disk(config: &BrowserConfig) {
     println!("=== Restoring {} Profile to Disk (Phase 5) ===", config.name);
-    
+
     let mut full_profile_path = config.base_dir.clone();
     full_profile_path.push(&config.profile_dir_name);
 
+    let leaf_name = full_profile_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&config.profile_dir_name);
+
     let mut static_backup_path = full_profile_path.clone();
-    let backup_name = format!("{}-backup", config.profile_dir_name);
+    let backup_name = format!("{}-backup", leaf_name);
     static_backup_path.set_file_name(backup_name);
 
-    let volatile_path = get_volatile_path(config.name, &config.profile_dir_name);
+    let volatile_path = get_volatile_path(config.name, leaf_name);
 
     // Wait briefly if browser is still shutting down during OS reboot.
     // Check every 100ms for up to 30 attempts (3 seconds total) to be highly responsive.
@@ -391,7 +472,6 @@ fn restore_profile_to_disk(config: &BrowserConfig) {
             .arg(format!("{}/", static_backup_path.display()))
             .status();
 
-        sanitize_chromium_preferences(&static_backup_path);
         cleanup_stale_locks(&static_backup_path);
     }
 
@@ -410,7 +490,6 @@ fn restore_profile_to_disk(config: &BrowserConfig) {
             eprintln!("Error restoring backup folder for {}: {:?}", config.name, e);
         } else {
             cleanup_stale_locks(&full_profile_path);
-            sanitize_chromium_preferences(&full_profile_path);
             println!("Successfully restored {} profile to SSD.", config.name);
         }
     }
@@ -423,14 +502,25 @@ fn restore_profile_to_disk(config: &BrowserConfig) {
 }
 
 fn main() {
-    let home = env::var("HOME").expect("Could not find HOME variable");
+    let home = match env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => {
+            eprintln!("Error: Could not find HOME variable");
+            return;
+        }
+    };
     let home_path = PathBuf::from(home);
 
     let mut browsers: Vec<BrowserConfig> = Vec::new();
 
-    // 1. Firefox Setup
+    // 1. Firefox Setup: Check ~/.config/mozilla/firefox first, fallback to ~/.mozilla/firefox
     let mut firefox_base = home_path.clone();
     firefox_base.push(".config/mozilla/firefox");
+    if !firefox_base.exists() {
+        firefox_base = home_path.clone();
+        firefox_base.push(".mozilla/firefox");
+    }
+
     let firefox_ini_path = firefox_base.join("profiles.ini");
     if let Ok(ini_content) = fs::read_to_string(&firefox_ini_path) {
         if let Some(profile_dir) = find_firefox_default_profile(&ini_content) {
@@ -440,16 +530,21 @@ fn main() {
                 profile_dir_name: profile_dir.to_string(),
                 lock_file_name: "lock",
                 exclude_patterns: &["cache2", "startupCache", "jumpListCache", "lock", ".parentlock"],
+                is_chromium: false,
             });
         }
     }
 
-    // 2. Brave Setup (Targeting Brave-Origin-Beta explicitly)
+    // 2. Brave Setup (Targeting Brave-Origin-Beta or Brave-Browser)
     let mut brave_base = home_path.clone();
     brave_base.push(".config/BraveSoftware/Brave-Origin-Beta");
+    if !brave_base.exists() {
+        brave_base = home_path.clone();
+        brave_base.push(".config/BraveSoftware/Brave-Browser");
+    }
     if brave_base.exists() {
         browsers.push(BrowserConfig {
-            name: "Brave-Origin-Beta",
+            name: "Brave",
             base_dir: brave_base,
             profile_dir_name: "Default".to_string(),
             lock_file_name: "SingletonLock",
@@ -459,19 +554,23 @@ fn main() {
                 "GPUCache",
                 "ShaderCache",
                 "SingletonLock",
-                "SingletonCookie",
                 "SingletonSocket",
                 "lockfile",
             ],
+            is_chromium: true,
         });
     }
 
-    // 3. Google Chrome Setup (Flatpak installation)
+    // 3. Google Chrome Setup (Flatpak or Native installation)
     let mut chrome_base = home_path.clone();
     chrome_base.push(".var/app/com.google.Chrome/config/google-chrome");
+    if !chrome_base.exists() {
+        chrome_base = home_path.clone();
+        chrome_base.push(".config/google-chrome");
+    }
     if chrome_base.exists() {
         browsers.push(BrowserConfig {
-            name: "Chrome-Flatpak",
+            name: "Chrome",
             base_dir: chrome_base,
             profile_dir_name: "Default".to_string(),
             lock_file_name: "SingletonLock",
@@ -481,10 +580,10 @@ fn main() {
                 "GPUCache",
                 "ShaderCache",
                 "SingletonLock",
-                "SingletonCookie",
                 "SingletonSocket",
                 "lockfile",
             ],
+            is_chromium: true,
         });
     }
 
@@ -509,7 +608,7 @@ fn main() {
     }
 
     println!("\nDaemon started! Entering Phase 4 Sync Loop (syncing every hour)...");
-    
+
     // Sync interval: 1 hour (3600 seconds)
     let sync_interval_secs = 3600;
     let mut seconds_counter = 0;
@@ -533,6 +632,6 @@ fn main() {
     for browser in &browsers {
         restore_profile_to_disk(browser);
     }
-    
+
     println!("Daemon shutdown complete. Goodbye!");
 }
