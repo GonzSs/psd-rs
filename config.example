@@ -1,0 +1,77 @@
+# psd-rs configuration file
+# Location: ~/.config/psd-rs/config
+#
+# This file controls which browser profiles are managed by psd-rs.
+# Format: keyword-value pairs separated by whitespace, like ssh_config.
+# Lines starting with # are comments. Empty lines are ignored.
+#
+# GLOBAL OPTIONS
+# These apply to all browsers unless noted otherwise.
+# Uncomment and modify as needed. Shown values are the defaults.
+#
+# How often to sync RAM back to SSD (seconds)
+# SyncInterval 3600
+#
+# Delay after detecting stale lock files before proceeding (milliseconds)
+# CooldownDelay 1500
+#
+# How long to wait for browser shutdown before refusing restore (milliseconds)
+# ShutdownGracePeriod 3000
+#
+# Base path for volatile (RAM-backed) storage
+# VolatilePath /dev/shm
+#
+# Logging verbosity: error, info, debug
+# LogLevel info
+
+
+# ─────────────────────────────────────────────
+# Browser Definitions
+# ─────────────────────────────────────────────
+# Each "Browser <name>" line starts a new block.
+# Indented lines below it belong to that block.
+# The block ends at the next Browser line or end of file.
+
+Browser firefox
+    BaseDir ~/.mozilla/firefox
+    ProfileDir auto
+    LockFile lock
+    Type gecko
+    Exclude cache2 startupCache jumpListCache lock .parentlock
+
+Browser brave
+    BaseDir ~/.config/BraveSoftware/Brave-Origin-Beta
+    ProfileDir Default
+    LockFile SingletonLock
+    Type chromium
+    Exclude Cache "Code Cache" GPUCache ShaderCache SingletonLock SingletonSocket lockfile
+
+Browser chrome
+    BaseDir ~/.var/app/com.google.Chrome/config/google-chrome
+    ProfileDir Default
+    LockFile SingletonLock
+    Type chromium
+    Exclude Cache "Code Cache" GPUCache ShaderCache SingletonLock SingletonSocket lockfile
+
+
+# ─────────────────────────────────────────────
+# Template — Uncomment and modify to add a browser
+# ─────────────────────────────────────────────
+# Browser <name>
+#     BaseDir <path>                  # ~ is expanded to $HOME
+#     ProfileDir <dirname|auto>       # "auto" reads profiles.ini (Type gecko only)
+#     LockFile <filename>             # Lock file the browser creates when running
+#     Type <chromium|gecko|generic>   # chromium = SingletonLock + Preferences cleanup
+#                                     # gecko    = profiles.ini + .parentlock handling
+#                                     # generic  = plain rsync, no browser-specific logic
+#     Exclude <pattern> [pattern...]  # Space-separated, quote patterns with spaces
+#
+# Notes:
+#   - If LockFile is omitted, defaults based on Type:
+#       chromium → SingletonLock, gecko → lock, generic → lockfile
+#   - If Exclude is omitted, defaults based on Type:
+#       chromium → Cache "Code Cache" GPUCache ShaderCache SingletonLock SingletonSocket lockfile
+#       gecko    → cache2 startupCache jumpListCache lock .parentlock
+#       generic  → (none)
+#   - BaseDir must point to the directory CONTAINING the profile folder,
+#     not the profile folder itself. ProfileDir names the subfolder.
