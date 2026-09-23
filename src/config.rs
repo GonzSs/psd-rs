@@ -220,7 +220,22 @@ fn resolve_auto_profiles(config: &mut PsdConfig) -> Result<(), String> {
         if browser.profile_dir_name == "auto" {
             match browser.browser_type {
                 BrowserType::Gecko => {
-                    let ini_path = browser.base_dir.join("profiles.ini");
+                    let mut ini_path = browser.base_dir.join("profiles.ini");
+                    if !ini_path.exists() {
+                        // Check alternate standard XDG/legacy Firefox paths
+                        if let Ok(home) = env::var("HOME") {
+                            let xdg_path = PathBuf::from(&home).join(".config/mozilla/firefox");
+                            let legacy_path = PathBuf::from(&home).join(".mozilla/firefox");
+                            if browser.base_dir == legacy_path && xdg_path.join("profiles.ini").exists() {
+                                browser.base_dir = xdg_path;
+                                ini_path = browser.base_dir.join("profiles.ini");
+                            } else if browser.base_dir == xdg_path && legacy_path.join("profiles.ini").exists() {
+                                browser.base_dir = legacy_path;
+                                ini_path = browser.base_dir.join("profiles.ini");
+                            }
+                        }
+                    }
+
                     let ini_content = fs::read_to_string(&ini_path).map_err(|e| {
                         format!(
                             "Browser '{}': ProfileDir is 'auto' but cannot read {}: {}",

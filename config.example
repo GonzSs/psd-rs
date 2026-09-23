@@ -33,7 +33,7 @@
 # The block ends at the next Browser line or end of file.
 
 Browser firefox
-    BaseDir ~/.mozilla/firefox
+    BaseDir ~/.config/mozilla/firefox  # Or ~/.mozilla/firefox depending on distro
     ProfileDir auto
     LockFile lock
     Type gecko

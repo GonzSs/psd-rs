@@ -106,7 +106,30 @@ pub fn restore_profile_to_disk(
     if let Ok(metadata) = fs::symlink_metadata(&full_profile_path) {
         if metadata.file_type().is_symlink() {
             log_info!("Removing symlink bridge for {}...", config.name);
-            let _ = fs::remove_file(&full_profile_path);
+            if let Err(e) = fs::remove_file(&full_profile_path) {
+                log_error!(
+                    "Failed to remove symlink for {}: {:?}. Restore may fail.",
+                    config.name,
+                    e
+                );
+            }
+        } else if metadata.file_type().is_dir() {
+            // Firefox may have recreated a real directory — move it aside
+            log_info!(
+                "Found real directory (not symlink) at profile path for {}. Moving aside...",
+                config.name
+            );
+            let leaf = leaf_name(&full_profile_path, &config.profile_dir_name);
+            let mut stale = full_profile_path.clone();
+            stale.set_file_name(format!("{}-stale", leaf));
+            let _ = fs::remove_dir_all(&stale);
+            if let Err(e) = fs::rename(&full_profile_path, &stale) {
+                log_error!(
+                    "Failed to move aside directory for {}: {:?}",
+                    config.name,
+                    e
+                );
+            }
         }
     }
 

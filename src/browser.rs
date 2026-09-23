@@ -13,7 +13,7 @@ use std::time::Duration;
 use crate::recovery;
 use crate::{
     cleanup_stale_locks, get_volatile_path, is_browser_running, leaf_name, rsync,
-    sanitize_chromium_preferences, BrowserConfig, BrowserType,
+    BrowserConfig,
     log_debug, log_error, log_info,
 };
 
@@ -120,9 +120,6 @@ pub fn process_browser(config: &BrowserConfig, volatile_base: &Path, cooldown_de
     }
 
     cleanup_stale_locks(&static_backup_path);
-    if config.browser_type == BrowserType::Chromium {
-        sanitize_chromium_preferences(&static_backup_path);
-    }
 
     log_debug!("Creating RAM directory at {:?}", volatile_path);
     if let Err(e) = fs::create_dir_all(&volatile_path) {
@@ -139,15 +136,38 @@ pub fn process_browser(config: &BrowserConfig, volatile_base: &Path, cooldown_de
     }
 
     cleanup_stale_locks(&volatile_path);
-    if config.browser_type == BrowserType::Chromium {
-        sanitize_chromium_preferences(&volatile_path);
-    }
 
     // --- Bridge with Symlink ---
-    // Ensure the target path is clear before creating the symlink
-    if full_profile_path.exists() || fs::symlink_metadata(&full_profile_path).is_ok() {
-        let _ = fs::remove_file(&full_profile_path);
-        let _ = fs::remove_dir_all(&full_profile_path);
+    // Ensure the target path is absolutely clear before creating the symlink.
+    // We must handle three possible states:
+    //   1. A dangling symlink (fs::exists returns false, but symlink_metadata succeeds)
+    //   2. A regular file
+    //   3. A directory (e.g. Firefox recreated its profile before psd-rs started)
+    match fs::symlink_metadata(&full_profile_path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || metadata.file_type().is_file() {
+                if let Err(e) = fs::remove_file(&full_profile_path) {
+                    log_error!(
+                        "Failed to remove existing file/symlink at {:?}: {:?}",
+                        full_profile_path,
+                        e
+                    );
+                    let _ = fs::rename(&static_backup_path, &full_profile_path);
+                    return;
+                }
+            } else if metadata.file_type().is_dir() {
+                if let Err(e) = fs::remove_dir_all(&full_profile_path) {
+                    log_error!(
+                        "Failed to remove existing directory at {:?}: {:?}",
+                        full_profile_path,
+                        e
+                    );
+                    let _ = fs::rename(&static_backup_path, &full_profile_path);
+                    return;
+                }
+            }
+        }
+        Err(_) => {} // Path doesn't exist at all — perfect
     }
 
     log_debug!("Creating symlink bridge...");
