@@ -38,6 +38,12 @@ tar -xzf psd-rs.tar.gz
 install -Dm 755 psd-rs "$HOME/.local/bin/psd-rs"
 install -dm 755 "$HOME/.config/systemd/user"
 
+# Set up default configuration if not already present
+if [[ ! -f "$HOME/.config/psd-rs/config" ]] && [[ -f config.example ]]; then
+    echo "Installing default configuration template to ~/.config/psd-rs/config..."
+    install -Dm 644 config.example "$HOME/.config/psd-rs/config"
+fi
+
 # Write the systemd user service file
 cat << EOF > "$HOME/.config/systemd/user/psd-rs.service"
 [Unit]
